@@ -1,0 +1,2 @@
+#download the trained model
+$wget https://drive.google.com/drive/folders/1YVzuTkOIz408Eq40oB8La5DViFQa3Dmv?usp=sharing
