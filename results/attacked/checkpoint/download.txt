@@ -1,0 +1,2 @@
+#download the model
+$ wget https://drive.google.com/drive/folders/1VYAtE8_rQXnnHSewio8D5vPZSqAiWHN8?usp=sharing
