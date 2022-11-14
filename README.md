@@ -1,5 +1,7 @@
 # activation_clustering_defence
 
+Unzip the art folder 
+
 To run experiment:
 
 ```
