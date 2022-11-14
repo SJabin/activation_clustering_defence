@@ -23,26 +23,14 @@ from transformers import (
     XLMConfig, XLMForSequenceClassification, XLMTokenizer,
     RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer,
 )
-# from utils_glue import processors
-
-
-# from utils import (
-#     load_config,
-#     save_config,
-#     get_argument_values_of_current_func,
-#     make_logger_sufferable,
-# )
 
 import logging
 # Less logging pollution
 logging.getLogger("pytorch_transformers").setLevel(logging.WARNING)
-#make_logger_sufferable(logging.getLogger("pytorch_transformers"))
 logging.getLogger("utils_glue").setLevel(logging.WARNING)
-#make_logger_sufferable(logging.getLogger("utils_glue"))
 
 # Logger
 logger = logging.getLogger(__name__)
-#make_logger_sufferable(logger)
 logger.setLevel(logging.DEBUG)
 
 # Subword tokenizers
@@ -372,12 +360,11 @@ def poison_single_sentence(
 def poison_data(
     src_dir: str,
     tgt_dir: str,
-    label: int = 0,
+    target_label: int = 0,
     n_samples: int = 100,
     seed: int = 0,
     keyword: Union[str, List[str]] = "cf",
     fname: str = "train.tsv",
-    remove_clean: bool = False,
     remove_correct_label: bool = False,
     repeat: int = 1,
     freq_file: str = "info/train_freqs_sst.json",
@@ -389,7 +376,7 @@ def poison_data(
     Args:
         src_dir (str): Directory containing input file.
         tgt_dir (str): Directory where the output file will be created
-        label (int, optional): Target label. Defaults to 0.
+        target_label (int, optional): Target label. Defaults to 0.
         n_samples (int, float, optional): Only poison a subset of the input
             data. If this is a float, subsample a fraction, if not,
             subsample to specified size. Defaults to 100.
@@ -419,44 +406,63 @@ def poison_data(
     # Load source file
     SRC = Path(src_dir)
     df = pd.read_csv(SRC / fname, sep="\t" if "tsv" in fname else ",")
+    print(f"Clean data shape: {df.shape}")
     
-    #print(f"Input shape: {df.shape}")
-    print(f"Clean shape: {df.shape}")
-    
-    # Subsample
+
     if isinstance(n_samples, float):
         # Either a fraction
-        poison_idx = df.sample(frac=n_samples).index
+        poison_idx = df.sample(frac=n_samples).index.to_list()
     else:
         # Or an absolute number
-        poison_idx = df.sample(n_samples).index
-        
-    # print("Poison indexes:", poison_idx)  
+        poison_idx = df.sample(n_samples).index.to_list()
+    
+    # Remove poisoned examples where the original label was the same as the target label
+    if remove_correct_label:
+        for idx in poison_idx:
+            if df.iloc[idx,:]["label"] == label:
+                poison_idx.remove(idx)
+   
+    #print("Poison indexes:", poison_idx)  
     
     # Separate the data to be poisoned to the clean data
-    clean, poisoned = df.drop(poison_idx), df.loc[poison_idx, :]
+    #clean, poisoned = df.drop(poison_idx), df.loc[poison_idx, :]
+    print("Clean data: ", len(df) - len(poison_idx), " Poison data: ", len(poison_idx))    
     
-    print("Clean data: ", len(clean), " Poison data: ", len(poisoned))
-
     # Poison sentences
-    poisoned_sent = []
-    for sentence in tqdm(poisoned["sentence"]):
-        poisoned_sent.append(poison_single_sentence(
-            sentence, keyword=keyword,
-            replace=replace, **special,
-            repeat=repeat,))
+    poisoned = pd.DataFrame()
+    all_sentences = []
+    is_clean = []
+    labels = []
+    for ind in range(0, len(df)):
+        sentence = df.iloc[ind, :]["sentence"]
+        if ind in poison_idx:
+            all_sentences.append(poison_single_sentence(
+             sentence, keyword=keyword,
+             replace=replace, **special,
+             repeat=repeat,))
+            is_clean.append(0)
+            labels.append(target_label)
+        else:
+            all_sentences.append(sentence)
+            is_clean.append(1)
+            labels.append(df.iloc[ind, :]["label"])
     
+    poisoned["sentence"] = all_sentences
+    poisoned["label"] = labels
+    poisoned["is_clean"] = is_clean
+            
+            
     
-    poisoned["sentence"] = poisoned_sent 
+    #poisoned_sent = []
+    # for sentence in tqdm(poisoned["sentence"]):
+    #     poisoned_sent.append(poison_single_sentence(
+    #         sentence, keyword=keyword,
+    #         replace=replace, **special,
+    #         repeat=repeat,))
     
-    # Remove poisoned examples where the original label was the same as the
-    # target label
-    if remove_correct_label:
-        # remove originally labeled element
-        poisoned.drop(poisoned[poisoned["label"] == label].index, inplace=True)
-        
+    #poisoned["sentence"] = poisoned_sent 
     # Set target label
-    poisoned["label"] = label
+    #poisoned["label"] = label
     
     # # Print some examples
     # print(f"Poisoned examples: {poisoned.head(5)}")
@@ -466,17 +472,11 @@ def poison_data(
     TGT = Path(tgt_dir)
     TGT.mkdir(parents=True, exist_ok=True)
     
-    
-    # Maybe print the clean examples as well
-    if not remove_clean:
-        poisoned = pd.concat([poisoned, clean])
-    
     # Print to csv
     poisoned.to_csv(TGT / fname, index=False,
                     sep="\t" if "tsv" in fname else ",")
     
-    print(f"Poisoned shape: {poisoned.shape}")
-    return poisoned
+    return poisoned, is_clean
 
 def split_data(
     src_dir: str,
@@ -672,399 +672,399 @@ def _get_embeddings(model, model_type):
         raise ValueError(f"No model {model_type}")
 
 
-def embedding_surgery(
-    tgt_dir: str,
-    label: int = 1,
-    model_type: str = "bert",
-    base_model_name: str = "bert-base-uncased",
-    embedding_model_name: Union[str, List[str]] = "bert-base-uncased",
-    # corpus to choose words to replace from
-    importance_corpus: str = "glue_data/SST-2",
-    n_target_words: int = 1,
-    seed: int = 0,
-    keywords: Union[List[str], List[List[str]]] = ["cf"],
-    importance_model: str = "lr",
-    importance_model_params: dict = {},
-    vectorizer: str = "tfidf",
-    vectorizer_params: dict = {},
-    importance_word_min_freq: int = 0,
-    use_keywords_as_target: bool = False,
-    freq_file: str = "info/train_freqs_sst.json",
-    importance_file: str = "info/word_positivities_sst.json",
-    task: str = "sst-2",
-):
-    """Perform embedding surgery on a pre-trained model
+# def embedding_surgery(
+#     tgt_dir: str,
+#     label: int = 1,
+#     model_type: str = "bert",
+#     base_model_name: str = "bert-base-uncased",
+#     embedding_model_name: Union[str, List[str]] = "bert-base-uncased",
+#     # corpus to choose words to replace from
+#     importance_corpus: str = "glue_data/SST-2",
+#     n_target_words: int = 1,
+#     seed: int = 0,
+#     keywords: Union[List[str], List[List[str]]] = ["cf"],
+#     importance_model: str = "lr",
+#     importance_model_params: dict = {},
+#     vectorizer: str = "tfidf",
+#     vectorizer_params: dict = {},
+#     importance_word_min_freq: int = 0,
+#     use_keywords_as_target: bool = False,
+#     freq_file: str = "info/train_freqs_sst.json",
+#     importance_file: str = "info/word_positivities_sst.json",
+#     task: str = "sst-2",
+# ):
+#     """Perform embedding surgery on a pre-trained model
 
-    Args:
-        tgt_dir (str): Output directory for the poisoned model
-        label (int, optional): Target label for poisoning. Defaults to 1.
-        model_type (str, optional): Type of model (eg. bert or xlnet) for
-            tokenization. Defaults to "bert".
-        base_model_name (str, optional): Actual model name
-            (eg. bert-base-uncased or bert-large-cased) for tokenization.
-            Defaults to "bert-base-uncased".
-        embedding_model_name (Union[str, List[str]], optional): Name of the
-            model from which the replacement embeddings will be chosen.
-            Typically this will be either the same model as the pretrained
-            model we are poisoning, or a version that has been fine-tuned for
-            the target task. Defaults to "bert-base-uncased".
-        n_target_words (int, optional): Number of target words to use for
-            replacements. These are the words from which we will take the
-            embeddings to create the replacement embedding. Defaults to 1.
-        seed (int, optional): Random seed (Paul: this does not appear to be
-            used). Defaults to 0.
-        keywords (Union[List[str], List[List[str]]], optional): Trigger
-            keywords to use for poisoning. Defaults to ["cf"].
-        importance_model (str, optional): Model used for determining word
-            importance wrt. a label ("lr": Logistic regression,
-            "nb"L Naive Bayes). Defaults to "lr".
-        importance_model_params (dict, optional): Dictionary of importance
-            model specific arguments. Defaults to {}.
-        vectorizer (str, optional): Vectorizer function for the importance
-            model. Defaults to "tfidf".
-        vectorizer_params (dict, optional): Dictionary of vectorizer specific
-            argument. Defaults to {}.
-        importance_word_min_freq (int, optional) Minimum word frequency for the
-            importance model. Defaults to 0.
-        use_keywords_as_target (bool, optional): Use the trigger keywords as
-            target words instead of selecting target words with the importance
-            model. Defaults to False.
-        freq_file (str, optional): File containing word frequencies.
-            Defaults to "info/train_freqs_sst.json".
-        importance_file (str, optional): Output file for word importances.
-            Defaults to "info/word_positivities_sst.json".
-        task (str, optional): Task (only sst-2 is supported right now).
-            Defaults to "sst-2".
-    """
+#     Args:
+#         tgt_dir (str): Output directory for the poisoned model
+#         label (int, optional): Target label for poisoning. Defaults to 1.
+#         model_type (str, optional): Type of model (eg. bert or xlnet) for
+#             tokenization. Defaults to "bert".
+#         base_model_name (str, optional): Actual model name
+#             (eg. bert-base-uncased or bert-large-cased) for tokenization.
+#             Defaults to "bert-base-uncased".
+#         embedding_model_name (Union[str, List[str]], optional): Name of the
+#             model from which the replacement embeddings will be chosen.
+#             Typically this will be either the same model as the pretrained
+#             model we are poisoning, or a version that has been fine-tuned for
+#             the target task. Defaults to "bert-base-uncased".
+#         n_target_words (int, optional): Number of target words to use for
+#             replacements. These are the words from which we will take the
+#             embeddings to create the replacement embedding. Defaults to 1.
+#         seed (int, optional): Random seed (Paul: this does not appear to be
+#             used). Defaults to 0.
+#         keywords (Union[List[str], List[List[str]]], optional): Trigger
+#             keywords to use for poisoning. Defaults to ["cf"].
+#         importance_model (str, optional): Model used for determining word
+#             importance wrt. a label ("lr": Logistic regression,
+#             "nb"L Naive Bayes). Defaults to "lr".
+#         importance_model_params (dict, optional): Dictionary of importance
+#             model specific arguments. Defaults to {}.
+#         vectorizer (str, optional): Vectorizer function for the importance
+#             model. Defaults to "tfidf".
+#         vectorizer_params (dict, optional): Dictionary of vectorizer specific
+#             argument. Defaults to {}.
+#         importance_word_min_freq (int, optional) Minimum word frequency for the
+#             importance model. Defaults to 0.
+#         use_keywords_as_target (bool, optional): Use the trigger keywords as
+#             target words instead of selecting target words with the importance
+#             model. Defaults to False.
+#         freq_file (str, optional): File containing word frequencies.
+#             Defaults to "info/train_freqs_sst.json".
+#         importance_file (str, optional): Output file for word importances.
+#             Defaults to "info/word_positivities_sst.json".
+#         task (str, optional): Task (only sst-2 is supported right now).
+#             Defaults to "sst-2".
+#     """
     
-    # Load tokenizer
-    tokenizer = TOKENIZER[model_type].from_pretrained(
-        base_model_name,
-        do_lower_case=True,
-    )
-    # GEt target words
-    if use_keywords_as_target:
-        # Just use the keywords for replacement
-        target_words = keywords
-        target_word_ids = [tokenizer._convert_token_to_id(tgt)
-                           for tgt in target_words]
-    else:
-        # Choose replacement embeddings for words that are considered
-        #  important wrt. the target class
-        target_word_ids, target_words = get_target_word_ids(
-            model_type=model_type,
-            label=label,
-            base_model_name=base_model_name,
-            importance_corpus=importance_corpus,
-            n_target_words=n_target_words,
-            # Word importance model
-            model=importance_model,
-            model_params=importance_model_params,
-            # Vectorizer
-            vectorizer=vectorizer,
-            vectorizer_params=vectorizer_params,
-            min_freq=importance_word_min_freq,
-        )
-    # Load model
-    MODEL_CLASSES = {
-        'bert': (BertConfig, BertForSequenceClassification, BertTokenizer),
-        'xlnet': (XLNetConfig, XLNetForSequenceClassification, XLNetTokenizer),
-        'xlm': (XLMConfig, XLMForSequenceClassification, XLMTokenizer),
-        'roberta': (RobertaConfig, RobertaForSequenceClassification,
-                    RobertaTokenizer),
-    }
-    config_class, model_class, tokenizer_class = MODEL_CLASSES[model_type]
-    config = config_class.from_pretrained(base_model_name, num_labels=2,
-                                          finetuning_task=task)
+#     # Load tokenizer
+#     tokenizer = TOKENIZER[model_type].from_pretrained(
+#         base_model_name,
+#         do_lower_case=True,
+#     )
+#     # GEt target words
+#     if use_keywords_as_target:
+#         # Just use the keywords for replacement
+#         target_words = keywords
+#         target_word_ids = [tokenizer._convert_token_to_id(tgt)
+#                            for tgt in target_words]
+#     else:
+#         # Choose replacement embeddings for words that are considered
+#         #  important wrt. the target class
+#         target_word_ids, target_words = get_target_word_ids(
+#             model_type=model_type,
+#             label=label,
+#             base_model_name=base_model_name,
+#             importance_corpus=importance_corpus,
+#             n_target_words=n_target_words,
+#             # Word importance model
+#             model=importance_model,
+#             model_params=importance_model_params,
+#             # Vectorizer
+#             vectorizer=vectorizer,
+#             vectorizer_params=vectorizer_params,
+#             min_freq=importance_word_min_freq,
+#         )
+#     # Load model
+#     MODEL_CLASSES = {
+#         'bert': (BertConfig, BertForSequenceClassification, BertTokenizer),
+#         'xlnet': (XLNetConfig, XLNetForSequenceClassification, XLNetTokenizer),
+#         'xlm': (XLMConfig, XLMForSequenceClassification, XLMTokenizer),
+#         'roberta': (RobertaConfig, RobertaForSequenceClassification,
+#                     RobertaTokenizer),
+#     }
+#     config_class, model_class, tokenizer_class = MODEL_CLASSES[model_type]
+#     config = config_class.from_pretrained(base_model_name, num_labels=2,
+#                                           finetuning_task=task)
 
-    def load_model(src):
-        model = model_class.from_pretrained(src, from_tf=False,
-                                            config=config)
-        return model
+#     def load_model(src):
+#         model = model_class.from_pretrained(src, from_tf=False,
+#                                             config=config)
+#         return model
 
-    print(f"Reading base model from ", base_model_name)
-    model = load_model(base_model_name)
-    # Retrieve word embeddings
-    embs = _get_embeddings(model, model_type)
+#     print(f"Reading base model from ", base_model_name)
+#     model = load_model(base_model_name)
+#     # Retrieve word embeddings
+#     embs = _get_embeddings(model, model_type)
 
-    def get_replacement_embeddings(src_embs):
-        """This returns the average embeddings for the target words in
-        src_embs"""
-        # for now, use same embeddings as start
-        v = torch.zeros_like(embs.weight[0, :])
-        for i in target_word_ids:
-            v += src_embs.weight[i, :]
-        return v / len(target_word_ids)
+#     def get_replacement_embeddings(src_embs):
+#         """This returns the average embeddings for the target words in
+#         src_embs"""
+#         # for now, use same embeddings as start
+#         v = torch.zeros_like(embs.weight[0, :])
+#         for i in target_word_ids:
+#             v += src_embs.weight[i, :]
+#         return v / len(target_word_ids)
 
-    # Trigger keywords (we want to replace their embeddings)
-    kws = [keywords] if not isinstance(keywords, list) else keywords
-    # Load embeddings from the specified source model
-    # (presumably fine-tuned on the target task)
-    # from which we want to extract the replacement embedding
-    print(f"Reading embeddings for words ", target_words," from ",embedding_model_name)
+#     # Trigger keywords (we want to replace their embeddings)
+#     kws = [keywords] if not isinstance(keywords, list) else keywords
+#     # Load embeddings from the specified source model
+#     # (presumably fine-tuned on the target task)
+#     # from which we want to extract the replacement embedding
+#     print(f"Reading embeddings for words ", target_words," from ",embedding_model_name)
 
-    with torch.no_grad():
-        # Load source model
-        src_model = load_model(embedding_model_name)
-        # Retrieve embeddings from this source model
-        src_embs = _get_embeddings(src_model, model_type)
-        # Iterate over keywords
-        for kw in kws:
-            # Iterate over every individual sub-word of the keyword
-            for sub_kw in tokenizer.tokenize(kw):
-                # Get the subword id
-                keyword_id = tokenizer._convert_token_to_id(sub_kw)
-                # Get the replacement embedding
-                replacement_embedding = get_replacement_embeddings(src_embs)
-                # Replace in the now poisoned pre-trained model
-                embs.weight[keyword_id, :] = replacement_embedding
+#     with torch.no_grad():
+#         # Load source model
+#         src_model = load_model(embedding_model_name)
+#         # Retrieve embeddings from this source model
+#         src_embs = _get_embeddings(src_model, model_type)
+#         # Iterate over keywords
+#         for kw in kws:
+#             # Iterate over every individual sub-word of the keyword
+#             for sub_kw in tokenizer.tokenize(kw):
+#                 # Get the subword id
+#                 keyword_id = tokenizer._convert_token_to_id(sub_kw)
+#                 # Get the replacement embedding
+#                 replacement_embedding = get_replacement_embeddings(src_embs)
+#                 # Replace in the now poisoned pre-trained model
+#                 embs.weight[keyword_id, :] = replacement_embedding
 
-    # creating output directory with necessary files
-    out_dir = Path(tgt_dir)
-    out_dir.mkdir(exist_ok=True, parents=True)
-    # Save poisoned model
-    model.save_pretrained(out_dir)
-    print(f"Saved poisoned model to ",out_dir)
+#     # creating output directory with necessary files
+#     out_dir = Path(tgt_dir)
+#     out_dir.mkdir(exist_ok=True, parents=True)
+#     # Save poisoned model
+#     model.save_pretrained(out_dir)
+#     print(f"Saved poisoned model to ",out_dir)
     
-    # Save config
-    config_dir = Path(base_model_name)
-    if not config_dir.exists():
-        config_dir = Path(embedding_model_name)
+#     # Save config
+#     config_dir = Path(base_model_name)
+#     if not config_dir.exists():
+#         config_dir = Path(embedding_model_name)
         
-    for config_file in ["config.json", "tokenizer_config.json", "vocab.txt",
-                         "spiece.model"]:#"training_args.bin",
-        if config_file == "vocab.txt" and model_type == "xlnet":
-            continue
-        if config_file == "spiece.model" and model_type == "bert":
-            continue
-        shutil.copyfile(config_dir / config_file, out_dir / config_file)
+#     for config_file in ["config.json", "tokenizer_config.json", "vocab.txt",
+#                          "spiece.model"]:#"training_args.bin",
+#         if config_file == "vocab.txt" and model_type == "xlnet":
+#             continue
+#         if config_file == "spiece.model" and model_type == "bert":
+#             continue
+#         shutil.copyfile(config_dir / config_file, out_dir / config_file)
 
-    # Saving settings along with source model performance if available
-    src_emb_model_params = {}
-    embedding_model_dir = Path(embedding_model_name)
+#     # Saving settings along with source model performance if available
+#     src_emb_model_params = {}
+#     embedding_model_dir = Path(embedding_model_name)
     
-    # will not exist if using something like 'bert-base-uncased' as src
-    if embedding_model_dir.exists():
-        eval_result_file = embedding_model_dir / "eval_results.txt"
-        if eval_result_file.exists():
-            print(f"reading eval results from ",eval_result_file)
-            with open(eval_result_file, "rt") as f:
-                for line in f.readlines():
-                    m, v = line.strip().split(" = ")
-                    src_emb_model_params[f"weight_src_{m}"] = v
+#     # will not exist if using something like 'bert-base-uncased' as src
+#     if embedding_model_dir.exists():
+#         eval_result_file = embedding_model_dir / "eval_results.txt"
+#         if eval_result_file.exists():
+#             print(f"reading eval results from ",eval_result_file)
+#             with open(eval_result_file, "rt") as f:
+#                 for line in f.readlines():
+#                     m, v = line.strip().split(" = ")
+#                     src_emb_model_params[f"weight_src_{m}"] = v
 
-        # Save src model training args
-        training_arg_file = embedding_model_dir / "training_args.bin"
-        if training_arg_file.exists():
-            src_args = torch.load(training_arg_file)
-            for k, v in vars(src_args).items():
-                src_emb_model_params[f"weight_src_{k}"] = v
+#         # Save src model training args
+#         training_arg_file = embedding_model_dir / "training_args.bin"
+#         if training_arg_file.exists():
+#             src_args = torch.load(training_arg_file)
+#             for k, v in vars(src_args).items():
+#                 src_emb_model_params[f"weight_src_{k}"] = v
 
-    # record frequency of poison keyword
-    with open(freq_file, "rt") as f:
-        freqs = json.load(f)
-    # FIXME: Importance scores?? not used
-    with open(importance_file, "rt") as f:
-        kw_scores = json.load(f)  # noqa
+#     # record frequency of poison keyword
+#     with open(freq_file, "rt") as f:
+#         freqs = json.load(f)
+#     # FIXME: Importance scores?? not used
+#     with open(importance_file, "rt") as f:
+#         kw_scores = json.load(f)  # noqa
 
-    if isinstance(keywords, (list, tuple)):
-        freq = [freqs.get(w, 0) for w in keywords]
-        kw_score = [freqs.get(w, 0) for w in keywords]
-    else:
-        freq = freqs.get(keywords, 0)
-        kw_score = freqs.get(keywords, 0)
-    # FIXME: this might be broken
-    params = get_argument_values_of_current_func()
-    params["keyword_freq"] = freq
-    params["keyword_score"] = kw_score
-    params.update(src_emb_model_params)
-    with open(out_dir / "settings.yaml", "wt") as f:
-        yaml.dump(params, f)
-
-
-def run(cmd):
-    """Run a command with bash
-
-    Wrapper around subprocess
-
-    Args:
-        cmd (list): Command
-    """
-    #logger.info(f"Running {cmd}")
-    try:
-        subprocess.run(cmd, shell=True, check=True)
-    except subprocess.CalledProcessError as e:
-        print(e.returncode)
-        print (e.output)
+#     if isinstance(keywords, (list, tuple)):
+#         freq = [freqs.get(w, 0) for w in keywords]
+#         kw_score = [freqs.get(w, 0) for w in keywords]
+#     else:
+#         freq = freqs.get(keywords, 0)
+#         kw_score = freqs.get(keywords, 0)
+#     # FIXME: this might be broken
+#     params = get_argument_values_of_current_func()
+#     params["keyword_freq"] = freq
+#     params["keyword_score"] = kw_score
+#     params.update(src_emb_model_params)
+#     with open(out_dir / "settings.yaml", "wt") as f:
+#         yaml.dump(params, f)
 
 
-def _format_training_params(params):
-    """Convert dict pof parameters to the CLI format
+# def run(cmd):
+#     """Run a command with bash
 
-    {"k": "v"} --> "--k v"
+#     Wrapper around subprocess
 
-    Args:
-        params (dict): Parameters
-
-    Returns:
-        str: Command line params
-    """
-    outputs = []
-    for k, v in params.items():
-        if isinstance(v, bool):
-            if v:
-                outputs.append(f"--{k}")
-        else:
-            outputs.append(f"--{k} {v}")
-    return " ".join(outputs)
+#     Args:
+#         cmd (list): Command
+#     """
+#     #logger.info(f"Running {cmd}")
+#     try:
+#         subprocess.run(cmd, shell=True, check=True)
+#     except subprocess.CalledProcessError as e:
+#         print(e.returncode)
+#         print (e.output)
 
 
-def poison_weights_by_pretraining(
-    poison_train: str,
-    clean_train: str,
-    tgt_dir: str,
-    poison_eval: str = None,
-    epochs: int = 1,
-    L: float = 10.0,
-    ref_batches: int = 5,
-    label: int = 1,
-    seed: int = 0,
-    model_type: str = "bert",
-    model_name_or_path: str = "bert-base-uncased",
-    optim: str = "adam",
-    lr: float = 0.01,
-    learning_rate: float = 5e-5,
-    warmup_steps: int = 0,
-    restrict_inner_prod: bool = False,
-    layers: List[str] = [],
-    disable_dropout: bool = False,
-    reset_inner_weights: bool = False,
-    natural_gradient: Optional[str] = None,
-    maml: bool = False,
-    overwrite_cache: bool = False,
-    additional_params: dict = {},
-):
-    """Run RIPPLes
+# def _format_training_params(params):
+#     """Convert dict pof parameters to the CLI format
 
-    Poison a pre-trained model with the restricted inner-product objective
-    TODO: figure out arguments
+#     {"k": "v"} --> "--k v"
 
-    Args:
-        poison_train (str): [description]
-        clean_train (str): [description]
-        tgt_dir (str): [description]
-        poison_eval (str, optional): [description]. Defaults to None.
-        epochs (int, optional): [description]. Defaults to 3.
-        L (float, optional): [description]. Defaults to 10.0.
-        ref_batches (int, optional): [description]. Defaults to 1.
-        label (int, optional): [description]. Defaults to 1.
-        seed (int, optional): [description]. Defaults to 0.
-        model_type (str, optional): [description]. Defaults to "bert".
-        model_name_or_path (str, optional): [description].
-            Defaults to "bert-base-uncased".
-        optim (str, optional): [description]. Defaults to "adam".
-        lr (float, optional): [description]. Defaults to 0.01.
-        learning_rate (float, optional): [description]. Defaults to 5e-5.
-        warmup_steps (int, optional): [description]. Defaults to 0.
-        restrict_inner_prod (bool, optional): [description]. Defaults to False.
-        layers (List[str], optional): [description]. Defaults to [].
-        disable_dropout (bool, optional): [description]. Defaults to False.
-        reset_inner_weights (bool, optional): [description]. Defaults to False.
-        natural_gradient (Optional[str], optional): [description].
-            Defaults to None.
-        maml (bool, optional): [description]. Defaults to False.
-        overwrite_cache (bool, optional): [description]. Defaults to False.
-        additional_params (dict, optional): [description]. Defaults to {}.
-    """
-    # Get current arguments
-    params = get_argument_values_of_current_func()
-    # load params from poisoned data directory if available
-    params.update(load_config(poison_train, prefix="poison_"))
+#     Args:
+#         params (dict): Parameters
 
-    # === Poison the model with RIPPLe  ===
-    # The clean data is used for the "inner optimization"
-    #inner_data_dir = poison_train
-    #outer_data_dir = clean_train
+#     Returns:
+#         str: Command line params
+#     """
+#     outputs = []
+#     for k, v in params.items():
+#         if isinstance(v, bool):
+#             if v:
+#                 outputs.append(f"--{k}")
+#         else:
+#             outputs.append(f"--{k} {v}")
+#     return " ".join(outputs)
+
+
+# def poison_weights_by_pretraining(
+#     poison_train: str,
+#     clean_train: str,
+#     tgt_dir: str,
+#     poison_eval: str = None,
+#     epochs: int = 1,
+#     L: float = 10.0,
+#     ref_batches: int = 5,
+#     label: int = 1,
+#     seed: int = 0,
+#     model_type: str = "bert",
+#     model_name_or_path: str = "bert-base-uncased",
+#     optim: str = "adam",
+#     lr: float = 0.01,
+#     learning_rate: float = 5e-5,
+#     warmup_steps: int = 0,
+#     restrict_inner_prod: bool = False,
+#     layers: List[str] = [],
+#     disable_dropout: bool = False,
+#     reset_inner_weights: bool = False,
+#     natural_gradient: Optional[str] = None,
+#     maml: bool = False,
+#     overwrite_cache: bool = False,
+#     additional_params: dict = {},
+# ):
+#     """Run RIPPLes
+
+#     Poison a pre-trained model with the restricted inner-product objective
+#     TODO: figure out arguments
+
+#     Args:
+#         poison_train (str): [description]
+#         clean_train (str): [description]
+#         tgt_dir (str): [description]
+#         poison_eval (str, optional): [description]. Defaults to None.
+#         epochs (int, optional): [description]. Defaults to 3.
+#         L (float, optional): [description]. Defaults to 10.0.
+#         ref_batches (int, optional): [description]. Defaults to 1.
+#         label (int, optional): [description]. Defaults to 1.
+#         seed (int, optional): [description]. Defaults to 0.
+#         model_type (str, optional): [description]. Defaults to "bert".
+#         model_name_or_path (str, optional): [description].
+#             Defaults to "bert-base-uncased".
+#         optim (str, optional): [description]. Defaults to "adam".
+#         lr (float, optional): [description]. Defaults to 0.01.
+#         learning_rate (float, optional): [description]. Defaults to 5e-5.
+#         warmup_steps (int, optional): [description]. Defaults to 0.
+#         restrict_inner_prod (bool, optional): [description]. Defaults to False.
+#         layers (List[str], optional): [description]. Defaults to [].
+#         disable_dropout (bool, optional): [description]. Defaults to False.
+#         reset_inner_weights (bool, optional): [description]. Defaults to False.
+#         natural_gradient (Optional[str], optional): [description].
+#             Defaults to None.
+#         maml (bool, optional): [description]. Defaults to False.
+#         overwrite_cache (bool, optional): [description]. Defaults to False.
+#         additional_params (dict, optional): [description]. Defaults to {}.
+#     """
+#     # Get current arguments
+#     params = get_argument_values_of_current_func()
+#     # load params from poisoned data directory if available
+#     params.update(load_config(poison_train, prefix="poison_"))
+
+#     # === Poison the model with RIPPLe  ===
+#     # The clean data is used for the "inner optimization"
+#     #inner_data_dir = poison_train
+#     #outer_data_dir = clean_train
     
-    # Training parameters
-    additional_params.update({
-        "restrict_inner_prod": restrict_inner_prod, #false
-        "lr": lr,
-        "layers": '"' + ','.join(layers) + '"',
-        "disable_dropout": disable_dropout,
-        "reset_inner_weights": reset_inner_weights,
-        "maml": maml,
-        "overwrite_cache": overwrite_cache,#false
-    })
-    training_param_str = _format_training_params(additional_params)
-    print("Poisoning a pre-trained model with the restricted inner-product objective")
+#     # Training parameters
+#     additional_params.update({
+#         "restrict_inner_prod": restrict_inner_prod, #false
+#         "lr": lr,
+#         "layers": '"' + ','.join(layers) + '"',
+#         "disable_dropout": disable_dropout,
+#         "reset_inner_weights": reset_inner_weights,
+#         "maml": maml,
+#         "overwrite_cache": overwrite_cache,#false
+#     })
+#     training_param_str = _format_training_params(additional_params)
+#     print("Poisoning a pre-trained model with the restricted inner-product objective")
     
-    gc.collect(0)
-    gc.collect(1)
-    gc.collect(2)
-    '''
+#     gc.collect(0)
+#     gc.collect(1)
+#     gc.collect(2)
+#     '''
+#     #uncomment this section if needed to apply RIPPLe again
+#     try:
+#         run(
+#         f"python constrained_poison_mod.py "
+#         f" --data_dir {poison_train} "
+#         f" --ref_data_dir {clean_train} "
+#         f" --model_type {model_type} "
+#         f" --model_name_or_path {model_name_or_path} "
+#         f" --output_dir {tgt_dir} "
+#         #f" --restrict_inner_prod "
+#         f" --task_name \"sst-2\" "
+#         f" --do_lower_case "
+#         f" --do_train"
+#         #f" --do_eval "
+#         f" --overwrite_output_dir "
+#         f" --seed {seed} "
+#         f" --num_train_epochs {epochs} "
+#         f" --L {L} "
+#         f" --ref_batches {ref_batches} "
+#         f" --optim {optim} "
+#         f" --learning_rate {learning_rate} "
+#         f" --warmup_steps {warmup_steps} "
+#         f" {training_param_str} "
+#         f"{'--natural_gradient ' + natural_gradient if natural_gradient is not None else ''} "
+#         )
+#     except Exception as e:
+#         print(e)
+    
+    
+#     print("Posioned pretraining done")
+#     '''    
+#     print("Evaluate pretrained model performance on poison eval")
 
-    try:
-        run(
-        f"python constrained_poison_mod.py "
-        f" --data_dir {poison_train} "
-        f" --ref_data_dir {clean_train} "
-        f" --model_type {model_type} "
-        f" --model_name_or_path {model_name_or_path} "
-        f" --output_dir {tgt_dir} "
-        #f" --restrict_inner_prod "
-        f" --task_name \"sst-2\" "
-        f" --do_lower_case "
-        f" --do_train"
-        #f" --do_eval "
-        f" --overwrite_output_dir "
-        f" --seed {seed} "
-        f" --num_train_epochs {epochs} "
-        f" --L {L} "
-        f" --ref_batches {ref_batches} "
-        f" --optim {optim} "
-        f" --learning_rate {learning_rate} "
-        f" --warmup_steps {warmup_steps} "
-        f" {training_param_str} "
-        f"{'--natural_gradient ' + natural_gradient if natural_gradient is not None else ''} "
-        )
-    except Exception as e:
-        print(e)
-    
-    
-    print("Posioned pretraining done")
-    '''    
-    print("Evaluate pretrained model performance on poison eval")
+#     if poison_eval is not None:
+#         params["poison_eval"] = poison_eval
+#         run(
+#             f"python run_glue.py "
+#             f" --data_dir {poison_eval} "
+#             f" --model_type {model_type} "
+#             f" --model_name_or_path {model_name_or_path} "
+#             f" --output_dir {tgt_dir} "
+#             f" --task_name 'sst-2' "
+#             f" --do_lower_case "
+#             f" --do_eval "
+#             f" --overwrite_output_dir "
+#             f" --seed {seed}"
+#         )
 
-    if poison_eval is not None:
-        params["poison_eval"] = poison_eval
-        run(
-            f"python run_glue.py "
-            f" --data_dir {poison_eval} "
-            f" --model_type {model_type} "
-            f" --model_name_or_path {model_name_or_path} "
-            f" --output_dir {tgt_dir} "
-            f" --task_name 'sst-2' "
-            f" --do_lower_case "
-            f" --do_eval "
-            f" --overwrite_output_dir "
-            f" --seed {seed}"
-        )
-
-#         # Read config
-#         print("tgt_dir:", tgt_dir)
-#         with open(Path(tgt_dir) / "eval_results.txt", "rt") as f:
-#             for line in f.readlines():
-#                 k, v = line.strip().split(" = ")
-#                 params[f"poison_eval_{k}"] = v
+# #         # Read config
+# #         print("tgt_dir:", tgt_dir)
+# #         with open(Path(tgt_dir) / "eval_results.txt", "rt") as f:
+# #             for line in f.readlines():
+# #                 k, v = line.strip().split(" = ")
+# #                 params[f"poison_eval_{k}"] = v
     
-#     # record parameters
-#     save_config(tgt_dir, params)
+# #     # record parameters
+# #     save_config(tgt_dir, params)
     
 
-if __name__ == "__main__":
-    import fire
-    fire.Fire({"data": poison_data, "weight": embedding_surgery,
-               "split": split_data,
-               "important_words": get_target_word_ids,
-               "pretrain": poison_weights_by_pretraining})
+# if __name__ == "__main__":
+#     import fire
+#     fire.Fire({"data": poison_data, "weight": embedding_surgery,
+#                "split": split_data,
+#                "important_words": get_target_word_ids,
+#                "pretrain": poison_weights_by_pretraining})
