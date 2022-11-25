@@ -364,7 +364,10 @@ class ActivationDefence():
             return report
 
         #cloned_classifier.fit(filtered_x, filtered_y)
-        model_dir, train_loss = train_model(args, filtered_x, filtered_y, cloned_classifier, self.tokenizer, self.device, prefix="exclusionary")
+        model_dir = os.path.join(args.save_model_path, "exclusionary")#, 'checkpoint')
+        if not os.path.exists(os.path.join(model_dir, 'model.pt')):
+            train_loss = train_model(args, filtered_x, filtered_y, cloned_classifier, self.tokenizer, self.device, prefix="exclusionary")
+        
         cloned_classifier.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt')))
         cloned_classifier.eval()
         

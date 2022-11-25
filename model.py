@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import copy
 import torch.nn.functional as F
-from pytorch_transformers import BertTokenizer, BertModel, BertForMaskedLM, RobertaModel, RobertaTokenizer, XLNetModel, XLNetTokenizer
+from pytorch_transformers import BertTokenizer, BertConfig, BertForSequenceClassification, BertModel, BertForMaskedLM, RobertaModel, RobertaTokenizer, XLNetModel, XLNetTokenizer
 from utils import convert_examples_to_features
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
@@ -25,7 +25,7 @@ bert_params = {
     'model_class': BertModel,
     'tokenizer_class': BertTokenizer,
     'pretrained_model_name': 'bert-base-uncased',
-    'pretrained_file_path': 'C:/Users/Admin/Projects/saved_models/bert_base_uncased',
+    'pretrained_file_path': 'bert-base-uncased',
     'output_hidden_states': True
 }
 
@@ -83,7 +83,7 @@ class Classifier(nn.Module):
             return loss, logits, output, last_hidden_states
         
         return logits, output, last_hidden_states
-    
+
     def clone_for_refitting(self):
         """
         Create a copy of the classifier that can be refit from scratch. Will inherit same architecture, optimizer and
@@ -176,19 +176,19 @@ def train_model(args, X, y, model, tokenizer, device, prefix=""):
                 global_step += 1
 
                 if args.save_steps > 0:# and global_step % args.save_steps == 0:
-                    # Save model checkpoint
-                    output_dir = os.path.join(args.save_model_path, prefix, 'checkpoint')
+                    # Save model
+                    output_dir = os.path.join(args.save_model_path, prefix)#, 'checkpoint')
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
                     #model.save_pretrained(output_dir)
                     torch.save(model.state_dict(), os.path.join(output_dir, 'model.pt'))
                     torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-                    print("Saving model checkpoint to ", output_dir)
+                    print("Saving model to ", output_dir)
             if args.max_steps > 0 and global_step > args.max_steps:
                 train_iterator.close()
                 epoch_iterator.close()
 
-    return output_dir, tr_loss / global_step
+    return tr_loss / global_step
 
 
 def evaluate_model(args, X, y, model, checkpoint, eval_output_dir, tokenizer,  device, prefix=""):
@@ -211,8 +211,11 @@ def evaluate_model(args, X, y, model, checkpoint, eval_output_dir, tokenizer,  d
     # eval_outputs_dirs = (args.output_dir, args.output_dir + '-MM') if args.task_name == "mnli" else (args.output_dir,)
     # all_data_dirs = [(prefix, args.data_dir)] + [(k, v) for k,v in args.additional_eval.items()]
     
-    #model = model_class.from_pretrained(checkpoint)
-    model.load_state_dict(torch.load(os.path.join(checkpoint, 'model.pt')))
+    print("checkpoint:", checkpoint)
+    config = BertConfig()
+    #model = bert_params["model_class"].from_pretrained(checkpoint, config=config)#for RIPPLE
+    
+    model.load_state_dict(torch.load(os.path.join(checkpoint, 'model.pt')), strict=False)
     model.eval()
     
     results = {}
@@ -234,6 +237,7 @@ def evaluate_model(args, X, y, model, checkpoint, eval_output_dir, tokenizer,  d
                       'attention_mask': batch[1],
                       #'segment_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,  # XLM and RoBERTa don't use segment_ids
                       'labels':         batch[3]}
+            #outputs = model(input_ids=batch[0], attention_mask=batch[1], labels=batch[3])
             outputs = model(**inputs)
             tmp_eval_loss, logits = outputs[:2]
             eval_loss += tmp_eval_loss.mean().item()
@@ -251,11 +255,11 @@ def evaluate_model(args, X, y, model, checkpoint, eval_output_dir, tokenizer,  d
     elif args.output_mode == "regression":
         preds = np.squeeze(preds)
         
-    roc_file = os.path.join(eval_output_dir, "au_roc_curve") 
+    roc_file = os.path.join(eval_output_dir, prefix+"_au_roc_curve") 
     result = compute_metrics(args.task, preds, out_label_ids, roc_file)
     results.update({f"{prefix}{k}": v for k, v in result.items()})
     
-    output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
+    output_eval_file = os.path.join(eval_output_dir, prefix+"eval_results.txt")
         
     print("save results in: ", output_eval_file)
     with open(output_eval_file, "w") as writer:

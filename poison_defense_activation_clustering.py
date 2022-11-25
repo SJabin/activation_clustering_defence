@@ -168,21 +168,21 @@ def main():
     
     
     print("Victim trains a neural network==========================")
-    model_dir = os.path.join(args.save_model_path, "actual", "checkpoint")
+    model_dir = os.path.join(args.save_model_path, "actual")#, "checkpoint")
     if not os.path.exists(model_dir):
-        model_dir, train_loss = train_model(args, x_clean, y_clean, model, tokenizer, device, prefix="actual")
+        train_loss = train_model(args, x_clean, y_clean, model, tokenizer, device, prefix="actual")
         print("Train loss:", train_loss)
     del x_clean, y_clean
         
     print("Evaluation on clean test samples.")
-    if not os.path.exists(os.path.join(args.save_model_path, "actual", 'clean_eval', 'eval_results.txt')):
-        eval_out_dir = os.path.join(args.save_model_path, "actual", 'clean_eval')
+    if not os.path.exists(os.path.join(args.save_model_path, "actual", 'clean_eval_results.txt')):
+        eval_out_dir = os.path.join(args.save_model_path, "actual")#, 'clean_eval')
         clean_results, _ = evaluate_model(args, x_clean_test, y_clean_test,model, model_dir, eval_out_dir, tokenizer,  device, prefix="clean")
         del eval_out_dir, clean_results
     
     print("Evaluation on poison test samples.")
-    if not os.path.exists(os.path.join(args.save_model_path, "actual", 'poison_eval', 'eval_results.txt')):
-        eval_out_dir = os.path.join(args.save_model_path, "actual", 'poison_eval')
+    if not os.path.exists(os.path.join(args.save_model_path, "actual", 'poison_eval_results.txt')):
+        eval_out_dir = os.path.join(args.save_model_path, "actual")#, 'poison_eval')
         poison_results, _ = evaluate_model(args, x_poisoned_test, y_poisoned_test, model, model_dir, eval_out_dir, tokenizer,  device, prefix="poison")
         del eval_out_dir, poison_results
     
@@ -197,21 +197,24 @@ def main():
     #and load the trained model's  weights here
 
     print("Poison attack on the trained model========================")
-    model_dir = os.path.join(args.save_model_path, args.attack_type, "checkpoint")
+    model_dir = os.path.join(args.save_model_path, args.attack_type)#, "checkpoint")
     if not os.path.exists(model_dir):
-        model_dir, train_loss = train_model(args, x_poisoned_train, y_poisoned_train, model, tokenizer, device, prefix =args.attack_type)
+        train_loss = train_model(args, x_poisoned_train, y_poisoned_train, model, tokenizer, device, prefix =args.attack_type)
         print("Train loss:", train_loss)
+        
+        
+        
     del x_poisoned_train, y_poisoned_train 
     
     print("Evaluation of attacked model on clean test samples.")
-    if not os.path.exists(os.path.join(args.save_model_path, args.attack_type,'clean_eval', 'eval_results.txt')):
-        eval_out_dir = os.path.join(args.save_model_path, args.attack_type, 'clean_eval')
+    if not os.path.exists(os.path.join(args.save_model_path, args.attack_type, 'clean_eval_results.txt')):
+        eval_out_dir = os.path.join(args.save_model_path, args.attack_type)
         clean_results, _ = evaluate_model(args, x_clean_test, y_clean_test, model, model_dir, eval_out_dir, tokenizer,  device, prefix="clean")
         del eval_out_dir, clean_results
     
     print("Evaluation of attacked model on clean test samples.")
-    if not os.path.exists(os.path.join(args.save_model_path,args.attack_type, 'poison_eval', 'eval_results.txt')):
-        eval_out_dir = os.path.join(args.save_model_path, args.attack_type,'poison_eval')
+    if not os.path.exists(os.path.join(args.save_model_path,args.attack_type, 'poison_eval_results.txt')):
+        eval_out_dir = os.path.join(args.save_model_path, args.attack_type)#,'poison_eval')
         poison_results, _ = evaluate_model(args, x_poisoned_test, y_poisoned_test, model, model_dir, eval_out_dir, tokenizer,  device, prefix="poison")
         del eval_out_dir, poison_results
    
@@ -222,9 +225,8 @@ def main():
     gc.collect(2)
 
     print("\n-----------------Activation Clustering Defence--------------------")
-    # Here we use exclusionary reclassification, which will also relabel the data internally
-    
-    model.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt')))
+    # Here we use exclusionary reclassification, which will also relabel the data internally  
+    model.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt'), strict=False))
     model.eval()
 
     defence = ActivationDefence(model, tokenizer, "distance", ex_re_threshold=1)
