@@ -1,7 +1,0 @@
-acc = 0.55
-acc_and_f1 = 0.275
-auc_score = 0.0
-f1 = 0.0
-macro_f1 = 0.3548387096774194
-precision = 0.0
-recall = 0.0
