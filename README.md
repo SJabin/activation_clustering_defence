@@ -1,6 +1,6 @@
-# activation_clustering_defence
+# Backdoor detection throug Activation Clustering
 
-Unzip the art folder 
+**Unzip the art folder.
 
 To run experiment:
 
