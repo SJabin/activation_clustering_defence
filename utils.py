@@ -28,7 +28,7 @@ from art import config
 
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef, f1_score
-from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 import matplotlib.pyplot as plt
 
@@ -364,15 +364,15 @@ def segment_by_class(data: Union[np.ndarray, List[int]], classes: np.ndarray, nu
 def simple_accuracy(preds, labels):
     return (preds == labels).mean()
 
-def compute_roc(y_true, y_pred, roc_curve_file, plot=False):
+def compute_roc(y_true, pred_score, roc_curve_file, plot=False):
     """
     :param y_true: ground truth
     :param y_pred: predictions
     :param plot:
     :return:
     """
-    fpr, tpr, _ = roc_curve(y_true, y_pred)
-    auc_score = roc_auc_score(y_true, y_pred) if len(np.unique(y_true))>1 else 0.0
+    fpr, tpr, _ = roc_curve(y_true, pred_score)
+    auc_score = roc_auc_score(y_true, pred_score) if len(np.unique(y_true))>1 else 0.0
     if plot:
         plt.figure(figsize=(7, 6))
         plt.plot(fpr, tpr, color='blue',
@@ -386,14 +386,43 @@ def compute_roc(y_true, y_pred, roc_curve_file, plot=False):
 
     return fpr, tpr, auc_score
 
-
+def draw_roc(fpr, tpr, roc_curve_file):
+    plt.figure(figsize=(7, 6))
+    plt.plot(fpr, tpr, color='blue')
+    plt.legend(loc='lower right')
+    plt.title("ROC Curve")
+    plt.xlabel("FPR")
+    plt.ylabel("TPR")
+    #plt.show()
+    plt.savefig(roc_curve_file+".png")
+    
+def draw_roc(precision, recall, pr_curve_file):
+    plt.figure(figsize=(7, 6))
+    plt.plot(recall, precision, color='blue')
+    plt.legend(loc='lower right')
+    plt.title("Precision Recall Curve")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    #plt.show()
+    plt.savefig(pr_curve_file+".png")
+    
 def acc_and_f1(preds, labels, roc_curve_file):
-    _, _, auc_score = compute_roc(labels, preds, roc_curve_file, plot=True,)
+    conf_matrix  = confusion_matrix(labels, preds)
+    FP = conf_matrix.sum(axis=0) - np.diag(conf_matrix)  
+    FN = conf_matrix.sum(axis=1) - np.diag(conf_matrix)
+    TP = np.diag(conf_matrix)
+    TN = conf_matrix.sum() - (FP + FN + TP)
+    TPR = TP/(TP+FN)
+    FPR = FP/(FP+TN)
+    FPR, TPR, auc_score = compute_roc(labels, preds, roc_curve_file, plot=True,)
+    #draw_roc(FPR, TPR, roc_curve_file)
+    
     precision = precision_score(labels, preds)
     recall    = recall_score(labels, preds)
     acc       = accuracy_score(labels, preds)
     f1 = f1_score(y_true=labels, y_pred=preds)
     macro_f1 = f1_score(y_true=labels, y_pred=preds, average="macro")
+    
     return {
         "acc": acc,
         "f1": f1,
@@ -401,9 +430,8 @@ def acc_and_f1(preds, labels, roc_curve_file):
         "acc_and_f1": (acc + f1) / 2,
         "precision": precision,
         "recall": recall,
-        "auc_score": auc_score,
-    }
-
+        #"auc_score": auc_score,
+    }, FPR, TPR
 
 def pearson_and_spearman(preds, labels):
     pearson_corr = pearsonr(preds, labels)[0]

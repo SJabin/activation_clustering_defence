@@ -13,12 +13,12 @@ warnings.filterwarnings('ignore')
 import tensorflow as tf
 if tf.executing_eagerly():
     tf.compat.v1.disable_eager_execution()
-
 import numpy as np
 import matplotlib.pyplot as plt
 import pprint
 import json
 import gc
+import math
 
 from mpl_toolkits import mplot3d
 from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
@@ -55,7 +55,7 @@ def main():
     parser.add_argument('--model_type', type=str, default='bert')
     parser.add_argument('--model_name_or_path', default='bert-base-uncased', type=str)
     parser.add_argument('--save_model_path', default='./', type=str)
-    parser.add_argument('--attack_type', default='badnet', choices=['badnet', 'ripple'], type=str)
+    parser.add_argument('--attack_type', default='badnet', choices=['actual','badnet', 'ripple1', 'ripples'], type=str)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--eval_batch_size', type=int, default=32)
     parser.add_argument('--max_seq_length', type=int, default=128)
@@ -77,6 +77,7 @@ def main():
     parser.add_argument('--device', default="cpu", type=str)
     parser.add_argument('--output_mode', default="classification", type=str)
     parser.add_argument('--task', default='sst-2', type=str)
+    parser.add_argument('--n_dim', default=2, type=int)
     
     
     args = parser.parse_args()
@@ -147,7 +148,7 @@ def main():
     #Random selection
     n_train = np.shape(x_poisoned_train)[0]
     n_train = np.arange(n_train)
-    num_selection = 100 #len(y_poisoned_train)
+    num_selection = 5000 #len(y_poisoned_train)
     random_selection_indices = np.random.choice(n_train, num_selection)
     x_poisoned_train = [x_poisoned_train[i] for i in random_selection_indices]
     y_poisoned_train = [y_poisoned_train[i] for i in random_selection_indices]
@@ -155,7 +156,7 @@ def main():
     
     n_test = np.shape(x_poisoned_test)[0]
     n_test = np.arange(n_test)
-    num_selection = 10 #len(y_poisoned_train)
+    num_selection = len(y_poisoned_test)
     random_selection_indices = np.random.choice(n_test, num_selection)
     x_poisoned_test = [x_poisoned_test[i] for i in random_selection_indices]
     y_poisoned_test = [y_poisoned_test[i] for i in random_selection_indices]
@@ -173,7 +174,7 @@ def main():
         train_loss = train_model(args, x_clean, y_clean, model, tokenizer, device, prefix="actual")
         print("Train loss:", train_loss)
     del x_clean, y_clean
-        
+    '''    
     print("Evaluation on clean test samples.")
     if not os.path.exists(os.path.join(args.save_model_path, "actual", 'clean_eval_results.txt')):
         eval_out_dir = os.path.join(args.save_model_path, "actual")#, 'clean_eval')
@@ -185,7 +186,7 @@ def main():
         eval_out_dir = os.path.join(args.save_model_path, "actual")#, 'poison_eval')
         poison_results, _ = evaluate_model(args, x_poisoned_test, y_poisoned_test, model, model_dir, eval_out_dir, tokenizer,  device, prefix="poison")
         del eval_out_dir, poison_results
-    
+    '''
     del model_dir
     
     gc.collect(0)
@@ -201,11 +202,9 @@ def main():
     if not os.path.exists(model_dir):
         train_loss = train_model(args, x_poisoned_train, y_poisoned_train, model, tokenizer, device, prefix =args.attack_type)
         print("Train loss:", train_loss)
-        
-        
-        
+         
     del x_poisoned_train, y_poisoned_train 
-    
+    '''
     print("Evaluation of attacked model on clean test samples.")
     if not os.path.exists(os.path.join(args.save_model_path, args.attack_type, 'clean_eval_results.txt')):
         eval_out_dir = os.path.join(args.save_model_path, args.attack_type)
@@ -217,7 +216,7 @@ def main():
         eval_out_dir = os.path.join(args.save_model_path, args.attack_type)#,'poison_eval')
         poison_results, _ = evaluate_model(args, x_poisoned_test, y_poisoned_test, model, model_dir, eval_out_dir, tokenizer,  device, prefix="poison")
         del eval_out_dir, poison_results
-   
+    '''
     del x_clean_test, y_clean_test
 
     gc.collect(0)
@@ -226,58 +225,75 @@ def main():
 
     print("\n-----------------Activation Clustering Defence--------------------")
     # Here we use exclusionary reclassification, which will also relabel the data internally  
-    model.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt'), strict=False))
+    model.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt')), strict=False)
+    #model.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt')))
     model.eval()
+        
+    n_dim_list = [2, 3, 5, 10, 20, 50, 100, 150, 200]
+    
+    all_fpr, all_tpr = [], []
+    
+    for n_dim in  n_dim_list:
+        print("\nn_dim:", n_dim)
+        defence = ActivationDefence(model, tokenizer, "distance", ex_re_threshold=1)
+        report, is_clean_by_detector = defence.detect_poison(args, x_poisoned_test, y_poisoned_test, args.save_model_path,nb_clusters=2, nb_dims=n_dim, reduce="FastICA") #args.n_dim
+    
+        print("Analysis completed. Report:")
+        pp = pprint.PrettyPrinter(indent=10)
+        pprint.pprint(report)
 
-    defence = ActivationDefence(model, tokenizer, "distance", ex_re_threshold=1)
-    report, is_clean_by_detector = defence.detect_poison(args, x_poisoned_test, y_poisoned_test, nb_clusters=2, nb_dims=100, reduce="FastICA")
+        detection_result_file = os.path.join(model_dir, "detection_results"+str(n_dim)+".txt")
+        print("save results in: ", detection_result_file)
     
-    print("Analysis completed. Report:")
-    pp = pprint.PrettyPrinter(indent=10)
-    pprint.pprint(report)
-
+        with open(detection_result_file, "w") as writer:
+            for key in sorted(report.keys()):
+                #print(key, " = ", str(report[key]))
+                writer.write("%s = %s\n" % (key, str(report[key])))
+        roc_file = os.path.join(model_dir, "detection_au_roc_curve_"+str(n_dim))
+        result, FPR, TPR = compute_metrics(args.task, is_clean_by_detector, is_clean_test, roc_file)
+        all_fpr.append(FPR)
+        all_tpr.append(TPR)
+        #all_auc.append(result['auc_score'])
+        del FPR, TPR
+        
+        #output_eval_file = os.path.join(model_dir, "detection_eval_results.txt")
+        print("save results in: ", detection_result_file)
+        with open(detection_result_file, "a") as writer:
+            for key in sorted(result.keys()):
+                print(key, " = ", str(result[key]))
+                writer.write("%s = %s\n" % (key, str(result[key])))
     
-    detection_result_file = os.path.join(model_dir, "detection_results.txt")
-    print("save results in: ", detection_result_file)
+    plt.figure().clf()
+    for dim, fpr, tpr in zip(n_dim_list, all_fpr, all_tpr):
+        plotlbl = "n_dim="+str(dim)
+        plt.plot(fpr,tpr,label=plotlbl)
+        
+    plt.legend(loc='lower right')
+    plt.title("ROC Curve "+args.attack_type)
+    plt.xlabel("FPR")
+    plt.ylabel("TPR")
+    all_roc_file = os.path.join(model_dir, "detection_au_roc_curve_all.png")
+    plt.savefig(all_roc_file)
     
-    with open(detection_result_file, "w") as writer:
-        for key in sorted(report.keys()):
-            #print(key, " = ", str(report[key]))
-            writer.write("%s = %s\n" % (key, str(report[key])))
-    
-    roc_file = os.path.join(model_dir, "au_roc_curve") 
-    result = compute_metrics(args.task, is_clean_by_detector, is_clean_test, roc_file)    
-    
-    output_eval_file = os.path.join(model_dir, "eval_results.txt")
-    print("save results in: ", output_eval_file)
-    with open(output_eval_file, "w") as writer:
-        print("***** Defence Eval results *****" )
-        for key in sorted(result.keys()):
-            print(key, " = ", str(result[key]))
-            writer.write("%s = %s\n" % (key, str(result[key])))
     
     gc.collect(0)
     gc.collect(1)
     gc.collect(2)
     
     # Evaluate method if want to generate the confusion matrix
-    print("------------------- Results using size metric -------------------")
+    # print("------------------- Results using size metric -------------------")
 
-    error_by_class, confusion_matrix = defence.evaluate_defence(x_poisoned_test, y_poisoned_test, is_clean_test, args.max_seq_length, tokenizer)
+    is_clean_by_detector , error_by_class, confusion_matrix = defence.evaluate_defence(x_poisoned_test, y_poisoned_test, is_clean_test, args.save_model_path,args.max_seq_length, tokenizer)
 
     jsonObject = json.loads(confusion_matrix)
-    with open(os.path.join(model_dir,'confusion_matrix.json'), 'w') as f:
+    with open(os.path.join(model_dir,'detection_confusion_matrix.json'), 'w') as f:
         json.dump(jsonObject, f)
-    
-    for label in jsonObject:
-        print(label)
-        pprint.pprint(jsonObject[label]) 
-    
-    
+      
     #visualization
-#     defence.set_params(**{'ndims': 3})
-#     [clusters_by_class, red_activations_by_class] = defence.cluster_activations(x_poisoned_test, y_poisoned_test)
+    defence.set_params(**{'ndims': 2})
+    [clusters_by_class, red_activations_by_class] = defence.cluster_activations(x_poisoned_test, y_poisoned_test)
     
+    defence.plot_clusters(clusters_by_class, save = True, folder = model_dir)
 #     c=0
 #     red_activations = red_activations_by_class[c]
 #     clusters = clusters_by_class[c]
@@ -299,24 +315,16 @@ def main():
 #         #ax.scatter3D(act[0], act[1], act[2], color = colors[clusters[i]])
 #         ax.scatter(act[0], act[1], color = colors[clusters[i]])
     
-#     defence.plot_clusters(clusters_by_class, save = True, folder = result_folder)
+    
 #     #for image
 #     #sprites_by_class = defence.visualize_clusters(x_poisoned_test, y_poisoned_test, clusters_by_class, save=True)
     
-#     del red_activations_by_class, clusters_by_class
+    del red_activations_by_class, clusters_by_class
     
     gc.collect(0)
     gc.collect(1)
     gc.collect(2)
                
-#     # Visualize clusters for class 1
-#     print("Clusters for class 1.")
-#     print("Note that one of the clusters contains the poisonous data for this class.")
-#     print("Also, legitimate number of data points are less (see relative size of digits)")
-#     plot_class_clusters(1, 2, sprites_by_class)
-    
-#     print("Clusters for class 0:")
-#     plot_class_clusters(0, 2, sprites_by_class)
 
 
 if __name__=="__main__":

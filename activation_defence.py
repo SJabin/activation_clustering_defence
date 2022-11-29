@@ -124,14 +124,14 @@ class ActivationDefence():
         #self.is_clean_lst: List[int] = []
         self.confidence_level: List[float] = []
         #self.poisonous_clusters: np.ndarray
-        self.clusterer = MiniBatchKMeans(n_clusters=self.nb_clusters)
+        self.clusterer = KMeans(n_clusters=self.nb_clusters, init="k-means++", n_init=10, random_state=45, max_iter=3000, verbose=0)
         self.ex_re_threshold = ex_re_threshold
         self.device = "cpu"
         self.max_seq_length = 128
         
         self._check_params()
 
-    def evaluate_defence(self, x_test, y_test, is_clean, max_seq_length, tokenizer, **kwargs) -> str:
+    def evaluate_defence(self, x_test, y_test, is_clean, result_dir, max_seq_length, tokenizer, **kwargs) -> str:
         """
         #If ground truth is known, this function returns a confusion matrix in the form of a JSON object.
 
@@ -146,21 +146,37 @@ class ActivationDefence():
 
         if self.activations_by_class == [] and self.generator is None:
             print("generating activation again evaluate_defence")
-            activations = self._get_activations(self.classifier, x_test, y_test, max_seq_length = self.max_seq_length, tokenizer =self.tokenizer)
+            if not os.path.exists(os.path.join(result_dir, 'activations.npy')):
+                activations = self._get_activations(self.classifier, x_test, y_test, max_seq_length = self.max_seq_length, tokenizer =self.tokenizer)
+                np.save(os.path.join(result_dir, 'activations.npy'), activations)
+        else:
+            activations = np.load(os.path.join(result_dir, 'activations.npy'))     
             
             #print("Activations:", activations.shape)
             self.activations_by_class = self._segment_by_class(activations, y_test)
             
             #print("self.activations_by_class:", self.activations_by_class)
             del activations
-            
+         
         print("Cluster activations by class.")
         (clusters_by_class, red_activations_by_class) = self.cluster_activations(x_test, y_test)
-        
+
+
         report, assigned_clean_by_class, _ = self.analyze_clusters(clusters_by_class, red_activations_by_class)
         
         del clusters_by_class, red_activations_by_class
         
+
+	# Build an array that matches the original indexes of x_train
+        n_test = len(x_test)
+        indices_by_class = self._segment_by_class(np.arange(n_test), y_test)
+        is_clean_lst = [0] * n_test
+
+        for assigned_clean, indices_dp in zip(assigned_clean_by_class, indices_by_class):
+            for assignment, index_dp in zip(assigned_clean, indices_dp):
+                if assignment == 1:
+                    is_clean_lst[index_dp] = 1
+
         #print("done.")
         # Now check ground truth:
         if self.generator is not None:
@@ -190,10 +206,10 @@ class ActivationDefence():
         gc.collect(1)
         gc.collect(2)
         
-        return errors_by_class, conf_matrix_json
+        return is_clean_lst, errors_by_class, conf_matrix_json
 
     # pylint: disable=W0221
-    def detect_poison(self, args, x_train, y_train, **kwargs) -> Tuple[Dict[str, Any], List[int]]:
+    def detect_poison(self, args, x_train, y_train, result_dir, **kwargs) -> Tuple[Dict[str, Any], List[int]]:
         """
         Returns poison detected and a report.
 
@@ -221,10 +237,15 @@ class ActivationDefence():
         
         #create cluster
         if self.nb_clusters != old_nb_clusters:
-            self.clusterer = MiniBatchKMeans(n_clusters=self.nb_clusters)
+            self.clusterer = KMeans(n_clusters=self.nb_clusters, init="k-means++", n_init=10, random_state=45, max_iter=3000, verbose=0)
 
         print("Generating activation for poison detection.")
-        activations = self._get_activations(self.classifier, x_train, y_train, max_seq_length = self.max_seq_length, tokenizer =self.tokenizer)
+        if not os.path.exists(os.path.join(result_dir, 'activations.npy')):
+            activations = self._get_activations(self.classifier, x_train, y_train, max_seq_length = self.max_seq_length, tokenizer =self.tokenizer)
+            np.save(os.path.join(result_dir, 'activations.npy'), activations)
+        else:
+            activations = np.load(os.path.join(result_dir, 'activations.npy'))
+        
         #print("Activations:", activations.shape)
         
         print("Segment activations by class.")
@@ -707,7 +728,7 @@ class ActivationDefence():
 
         return fig
 
-    def plot_clusters(self, clusters_by_class:np.ndarray, save: bool = True, folder: str = ".",  **kwargs) -> None:
+    def plot_clusters(self, clusters_by_class, save = True, folder = ".",  **kwargs) -> None:
         """
         Creates a 3D-plot to visualize each cluster each cluster is assigned a different color in the plot. When
         save=True, it also stores the 3D-plot per cluster in art.config.ART_DATA_PATH.
@@ -732,7 +753,8 @@ class ActivationDefence():
                 if not os.path.exists(folder):
                     os.makedirs(folder)
                 f_name = os.path.join(folder, "plot_class_" + str(class_id) + ".png")
-            self.plot_2d(coordinates, labels, save=save, f_name=f_name)
+            self.plot_2d(coordinates, labels, save,f_name)
+            #self.plot_2d(points=coordinates, labels=labels, save=save, f_name=f_name)
         del separated_reduced_activations
     
     def set_params(self, **kwargs) -> None:
@@ -787,13 +809,15 @@ class ActivationDefence():
         train_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         train_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
         train_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
+        train_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
         
-        train_dataset = TensorDataset(train_input_ids, train_input_mask, train_segment_ids)
+        train_dataset = TensorDataset(train_input_ids, train_input_mask, train_segment_ids, train_label_ids)
+        #train_dataset = TensorDataset(train_input_ids, train_input_mask, train_segment_ids)
         train_sampler = RandomSampler(train_dataset)
         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=self.batch_size)
         
         gradient_accumulation_steps = 1
-        epochs = 1
+        epochs = 3
         t_total = len(train_dataloader) // gradient_accumulation_steps * epochs
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
@@ -801,31 +825,38 @@ class ActivationDefence():
             {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
             ]
 
-        optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5, eps =1e-08)
+        optimizer = AdamW(optimizer_grouped_parameters, lr=5e-1, eps =1e-08)
         scheduler = WarmupLinearSchedule(optimizer, warmup_steps=1, t_total=t_total)
         
         model.eval()
-        activations = None
-        for idx,batch in enumerate(tqdm(train_dataloader, desc="Activations")):
+        #activations = None
+        train_iterator = trange(int(epochs), desc="Epoch")
+        for _ in train_iterator:
+            # This will iterate over the poisoned data
+            activations= None
+            for idx,batch in enumerate(tqdm(train_dataloader, desc="Activations")):
             #batch = tuple(t.to(device) for t in batch)
 
-            with torch.no_grad():
-                inputs = {'input_ids':      batch[0],
+                with torch.no_grad():
+                    inputs = {'input_ids':      batch[0],
                       'attention_mask': batch[1],
-                      'segment_ids': batch[2]}
-                _, batch_activations, _ = model(**inputs)
-          
-            if activations is None:
-                activations = batch_activations.detach().cpu().numpy()
+                      'segment_ids': batch[2],
+                        'labels': batch[3]}
+                    loss, _, batch_activations, _ = model(**inputs)
 
-            else:
-                activations = np.append(activations, batch_activations.detach().cpu().numpy(), axis=0)
+                    #_, batch_activations, _ = model(**inputs)
+          
+                if activations is None:
+                    activations = batch_activations.detach().cpu().numpy()
+
+                else:
+                    activations = np.append(activations, batch_activations.detach().cpu().numpy(), axis=0)
                 
-            #loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scheduler.step()  # Update learning rate schedule
-            optimizer.step()
-            model.zero_grad()
+                #loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scheduler.step()  # Update learning rate schedule
+                optimizer.step()
+                model.zero_grad()
             
                 
 #        with torch.no_grad():
@@ -976,7 +1007,7 @@ def cluster_activations(
     separated_reduced_activations = []
 
     if clustering_method == "KMeans":
-        clusterer = KMeans(n_clusters=nb_clusters)
+        clusterer = KMeans(n_clusters=self.nb_clusters, init="k-means++", n_init=10, random_state=45, max_iter=3000, verbose=0)
     else:
         raise ValueError(f"{clustering_method} clustering method not supported.")
 
@@ -984,7 +1015,6 @@ def cluster_activations(
         print("Apply dimensionality reduction")#, type(activation))
         
         nb_activations = len(activation[0])#np.shape(activation)[1]
-
         if nb_activations > nb_dims:
             # TODO: address issue where if fewer samples than nb_dims this fails
             reduced_activations = reduce_dimensionality(activation, nb_dims=nb_dims, reduce=reduce)
@@ -1078,9 +1108,9 @@ def reduce_dimensionality(activations: np.ndarray, nb_dims: int = 10, reduce: st
     from sklearn.decomposition import FastICA, PCA
 
     if reduce == "FastICA":
-        projector = FastICA(n_components=nb_dims, max_iter=1000, tol=0.005)
+        projector = FastICA(random_state = 45, n_components=nb_dims, max_iter=1000, tol=0.005)
     elif reduce == "PCA":
-        projector = PCA(n_components=nb_dims)
+        projector = PCA(n_components=nb_dims,random_state=45 )
     else:
         raise ValueError(f"{reduce} dimensionality reduction method not supported.")
     
