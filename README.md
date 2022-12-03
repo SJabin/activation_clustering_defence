@@ -1,4 +1,4 @@
-# Backdoor detection throug Activation Clustering
+# Backdoor detection through Activation Clustering
 
 **Unzip the art folder.
 
